@@ -1,15 +1,16 @@
+pub mod db_data;
+
 use crate::archive_testtools::{self, config::ArchiveType, utils};
 use actix_http::Request;
 use actix_service::Service;
 use actix_web::{
-    dev::ServiceResponse,
-    test::{self},
-    Error,
+    Error, dev::ServiceResponse, rt::time, test::{self}
 };
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::Once;
-use stelae::db;
+use stelae::db::{self, DatabaseConnection};
+use std::time::Duration;
 use stelae::server::api::state::Global;
 use tempfile::Builder;
 static INIT: Once = Once::new();
@@ -35,6 +36,7 @@ pub fn blob_to_string(blob: Vec<u8>) -> String {
 #[derive(Debug, Clone)]
 pub struct TestAppState {
     pub archive: Archive,
+    pub db: DatabaseConnection,
 }
 
 impl Global for TestAppState {
@@ -42,7 +44,7 @@ impl Global for TestAppState {
         &self.archive
     }
     fn db(&self) -> &db::DatabaseConnection {
-        unimplemented!()
+        &self.db
     }
 }
 
@@ -50,9 +52,65 @@ pub async fn initialize_app(
     archive_path: &Path,
 ) -> impl Service<Request, Response = ServiceResponse<impl MessageBody>, Error = Error> {
     let archive = Archive::parse(archive_path.to_path_buf(), archive_path, false).unwrap();
-    let state = TestAppState { archive };
+    let db = match db::init::connect(&archive_path).await {
+        Ok(db) => db,
+        Err(err) => {
+            tracing::error!(
+                "error: could not connect to database. Confirm that DATABASE_URL env var is set correctly."
+            );
+            tracing::error!("Error: {:?}", err);
+            panic!()
+        }
+    };
+    let state = TestAppState { archive, db };
     let app = app::init(&state).unwrap();
     test::init_service(app).await
+}
+
+/// Like `initialize_app`, but also returns a `DatabaseConnection` whose pool can be
+/// explicitly closed (`db.pool.close().await`) before the `TempDir` drops.
+/// This is necessary on Windows where SQLite WAL files remain locked until all pool
+/// connections are fully closed, preventing `TempDir::drop` from deleting the directory.
+pub async fn initialize_app_with_db(
+    archive_path: &Path,
+) -> (
+    impl Service<Request, Response = ServiceResponse<impl MessageBody>, Error = Error>,
+    DatabaseConnection,
+) {
+    let archive = Archive::parse(archive_path.to_path_buf(), archive_path, false).unwrap();
+    let db = match db::init::connect(&archive_path).await {
+        Ok(db) => db,
+        Err(err) => {
+            tracing::error!(
+                "error: could not connect to database. Confirm that DATABASE_URL env var is set correctly."
+            );
+            tracing::error!("Error: {:?}", err);
+            panic!()
+        }
+    };
+    // Override WAL mode for tests. The DB is empty at this point so the
+    // checkpoint is a no-op; SQLite never creates -wal/-shm files, which
+    // makes TempDir cleanup reliable on Windows.
+    let _ = sqlx::query("PRAGMA journal_mode=DELETE")
+        .execute(&db.pool)
+        .await;
+    let db_handle = db.clone();
+    let state = TestAppState { archive, db };
+    let app = app::init(&state).unwrap();
+    (test::init_service(app).await, db_handle)
+}
+
+pub async fn get_db(archive_path: &Path) -> DatabaseConnection {
+    match db::init::connect(&archive_path).await {
+        Ok(db) => db,
+        Err(err) => {
+            tracing::error!(
+                "error: could not connect to database. Confirm that DATABASE_URL env var is set correctly."
+            );
+            tracing::error!("Error: {:?}", err);
+            panic!()
+        }
+    }
 }
 
 pub fn initialize_archive(archive_type: ArchiveType) -> Result<tempfile::TempDir> {

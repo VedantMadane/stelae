@@ -5,6 +5,8 @@ use crate::{
         utils,
     },
     common,
+    common::db_data::insert_redirects,
+    common::get_db,
 };
 use actix_http::header::IF_NONE_MATCH;
 use actix_http::StatusCode;
@@ -252,6 +254,7 @@ async fn get_law_html_request_with_old_if_no_match_header_expect_new_tag() {
     }
 }
 
+#[actix_web::test]
 async fn test_redirect_dependant_stele_law_html_request_with_correct_redirects_json_expect_success()
 {
     let archive_path =
@@ -270,6 +273,16 @@ async fn test_redirect_dependant_stele_law_html_request_with_correct_redirects_j
     "#
     .to_string();
 
+    let db = get_db(archive_path.path()).await;
+
+    insert_redirects(
+        &db,
+        "stele_1/law",
+        "law-html",
+        vec![("/not/a/good/path", "/")],
+    )
+    .await;
+
     let _ = add_redirects_json_file(&stelae_1_html_repo_path, file_content);
     let app = common::initialize_app(archive_path.path()).await;
 
@@ -277,6 +290,7 @@ async fn test_redirect_dependant_stele_law_html_request_with_correct_redirects_j
     let req = test::TestRequest::get()
         .uri(request_uri)
         .insert_header(("X-Current-Documents-Guard", "stele_1/law"))
+        .insert_header(("X-Stelae", "stele_1/law"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
@@ -308,6 +322,7 @@ async fn test_redirect_dependant_stele_law_html_request_with_correct_redirects_j
         .to_request();
     let resp = test::call_service(&app, req3).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    drop(db);
 }
 
 #[actix_web::test]
@@ -317,43 +332,34 @@ async fn test_redirect_dependant_stelae_law_html_requests_with_correct_redirects
         common::initialize_archive_without_bare(ArchiveType::Multihost(MultihostConfig::Public))
             .unwrap();
 
-    let stelae_1_html_repo_path: PathBuf = archive_path.path().join("stele_1/law-html");
-    let stelae_2_html_repo_path: PathBuf = archive_path.path().join("stele_2/law-html");
-    let stelae_1_1_html_repo_path: PathBuf = archive_path.path().join("stele_1_1/law-html");
+    let db = get_db(archive_path.path()).await;
 
-    let file_content = r#"
-    [
-        [
-            "/not/a/good/path",
-            "/"
-        ]
-    ]
-    "#
-    .to_string();
+    insert_redirects(
+        &db,
+        "stele_1/law",
+        "law-html",
+        vec![("/not/a/good/path", "/")],
+    )
+    .await;
 
-    let file_content1 = r#"
-    [
-        [
-            "/not/a/good/path",
-            "/a/"
-        ]
-    ]
-    "#
-    .to_string();
+    insert_redirects(
+        &db,
+        "stele_2/law",
+        "law-html",
+        vec![("/not/a/good/path", "/a/")],
+    )
+    .await;
 
-    let file_content2 = r#"
-    [
-        [
-            "/not/a/good/path",
-            "/a/b"
-        ]
-    ]
-    "#
-    .to_string();
+    insert_redirects(
+        &db,
+        "stele_1_1/law",
+        "law-html",
+        vec![("/not/a/good/path", "/a/b")],
+    )
+    .await;
 
-    let _ = add_redirects_json_file(&stelae_1_html_repo_path, file_content);
-    let _ = add_redirects_json_file(&stelae_2_html_repo_path, file_content1);
-    let _ = add_redirects_json_file(&stelae_1_1_html_repo_path, file_content2);
+    db.pool.close().await;
+
     let app = common::initialize_app(archive_path.path()).await;
 
     let cases = [
@@ -367,6 +373,7 @@ async fn test_redirect_dependant_stelae_law_html_requests_with_correct_redirects
         let req = test::TestRequest::get()
             .uri(request_uri)
             .insert_header(("X-Current-Documents-Guard", guard_value))
+            .insert_header(("X-Stelae", guard_value))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
@@ -389,4 +396,5 @@ async fn test_redirect_dependant_stelae_law_html_requests_with_correct_redirects
         .to_request();
     let resp = test::call_service(&app, req3).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    drop(db);
 }
